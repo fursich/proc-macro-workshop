@@ -6,9 +6,11 @@ use syn::{parse_macro_input, Data, DeriveInput, Fields};
 #[proc_macro_derive(Builder)]
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-
-    let name = input.ident;
-    let ident = Ident::new(&format!("{}Builder", name.to_string()), Span::call_site());
+    let base_struct = input.ident;
+    let builder = Ident::new(
+        &format!("{}Builder", base_struct.to_string()),
+        Span::call_site(),
+    );
 
     let data = input.data;
     let fields = match data {
@@ -28,15 +30,23 @@ pub fn derive(input: TokenStream) -> TokenStream {
         .collect::<Vec<_>>();
 
     let expanded = quote! {
-        pub struct #ident {
+        pub struct #builder {
             #(#field_idents: Option<#field_types>,)*
         }
-        impl #name {
-            pub fn builder() -> #ident {
-                #ident {
+        impl #base_struct {
+            pub fn builder() -> #builder {
+                #builder {
                     #(#field_idents: None,)*
                 }
             }
+        }
+        impl #builder {
+            #(
+                fn #field_idents(&mut self, #field_idents: #field_types) -> &mut Self {
+                    self.#field_idents = Some(#field_idents);
+                    self
+                }
+            )*
         }
     };
 
