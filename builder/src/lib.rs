@@ -36,6 +36,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let expanded = quote! {
         use std::error::Error;
 
+        #[derive(Clone)]
         pub struct #builder {
             #(#field_idents: Option<#field_types>,)*
         }
@@ -53,10 +54,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     self
                 }
             )*
-            pub fn build(self) -> Result<#base_struct, Box<dyn Error>> {
+            pub fn build(&self) -> Result<#base_struct, Box<dyn Error>> {
                 let #builder {
                     #(#field_idents,)*
-                } = self;
+                } = self.clone();
                 let built = #base_struct {
                     #(#field_idents: #field_idents.ok_or(Box::<dyn Error>::from(#missing_ident_errors))?,)*
                 };
