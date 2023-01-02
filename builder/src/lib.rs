@@ -28,8 +28,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
         .iter()
         .map(|field| field.ty.to_owned())
         .collect::<Vec<_>>();
+    let missing_ident_errors = fields
+        .iter()
+        .map(|field| format!("{} is missing", field.ident.to_owned().unwrap()))
+        .collect::<Vec<_>>();
 
     let expanded = quote! {
+        use std::error::Error;
+
         pub struct #builder {
             #(#field_idents: Option<#field_types>,)*
         }
@@ -47,6 +53,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     self
                 }
             )*
+            pub fn build(self) -> Result<#base_struct, Box<dyn Error>> {
+                let #builder {
+                    #(#field_idents,)*
+                } = self;
+                let built = #base_struct {
+                    #(#field_idents: #field_idents.ok_or(Box::<dyn Error>::from(#missing_ident_errors))?,)*
+                };
+                Ok(built)
+            }
         }
     };
 
