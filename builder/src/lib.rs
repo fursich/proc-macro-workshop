@@ -3,7 +3,8 @@ use proc_macro2::{Ident, Span};
 use quote::quote;
 use syn::{
     parse_macro_input, AngleBracketedGenericArguments, Data, DeriveInput, Field, Fields,
-    GenericArgument, Path, PathArguments, Type, TypePath,
+    GenericArgument, Lit, Meta, MetaList, MetaNameValue, NestedMeta, Path, PathArguments,
+    PathSegment, Type, TypePath,
 };
 
 #[proc_macro_derive(Builder, attributes(builder))]
@@ -18,17 +19,30 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let data = input.data;
     let field_definitions = _FieldDefinitions::new(data);
 
-    let idents = field_definitions.idents();
-    let mandatory_field_idents = field_definitions.partial_idents(false);
-    let optional_field_idents = field_definitions.partial_idents(true);
-
-    let mandatory_field_types = field_definitions.partial_types(false, false);
-    let optional_base_field_types = field_definitions.partial_types(true, true);
-
+    let mandatory_field_idents = field_definitions.filtered_by(false, false).select_idents();
+    let mandatory_field_types = field_definitions.filtered_by(false, false).select_types();
     let missing_ident_errors = mandatory_field_idents
         .iter()
         .map(|ident| format!("{} is missing", ident.to_owned()))
         .collect::<Vec<_>>();
+
+    let option_field_idents = field_definitions.filtered_by(true, false).select_idents();
+    let option_base_field_types = field_definitions
+        .filtered_by(true, false)
+        .select_base_types();
+
+    let vec_field_idents = field_definitions.filtered_by(false, true).select_idents();
+    let vec_base_field_types = field_definitions
+        .filtered_by(false, true)
+        .select_base_types();
+
+    let (vec_setter_idents, vec_setter_types) = field_definitions
+        .filtered_by(false, true)
+        .select_vec_setter_components();
+    let (vec_element_container_idents, vec_element_setter_idents, vec_element_setter_types) =
+        field_definitions
+            .filtered_by(false, true)
+            .select_vec_element_setter_components();
 
     let expanded = quote! {
         use std::error::Error;
@@ -36,12 +50,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
         #[derive(Clone)]
         pub struct #builder {
             #(#mandatory_field_idents: Option<#mandatory_field_types>,)*
-            #(#optional_field_idents: Option<#optional_base_field_types>,)*
+            #(#option_field_idents: Option<#option_base_field_types>,)*
+            #(#vec_field_idents: Vec<#vec_base_field_types>,)*
         }
         impl #base_struct {
             pub fn builder() -> #builder {
                 #builder {
-                    #(#idents: None,)*
+                    #(#mandatory_field_idents: None,)*
+                    #(#option_field_idents: None,)*
+                    #(#vec_field_idents: Vec::new(),)*
                 }
             }
         }
@@ -53,18 +70,34 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 }
             )*
             #(
-                fn #optional_field_idents(&mut self, #optional_field_idents: #optional_base_field_types) -> &mut Self {
-                    self.#optional_field_idents = Some(#optional_field_idents);
+                fn #option_field_idents(&mut self, #option_field_idents: #option_base_field_types) -> &mut Self {
+                    self.#option_field_idents = Some(#option_field_idents);
                     self
                 }
             )*
+            #(
+                fn #vec_setter_idents(&mut self, #vec_setter_idents: #vec_setter_types) -> &mut Self {
+                    self.#vec_setter_idents = #vec_setter_idents;
+                    self
+                }
+            )*
+            #(
+                fn #vec_element_setter_idents(&mut self, #vec_element_setter_idents: #vec_element_setter_types) -> &mut Self {
+                    self.#vec_element_container_idents.push(#vec_element_setter_idents);
+                    self
+                }
+            )*
+
             pub fn build(&self) -> Result<#base_struct, Box<dyn Error>> {
                 let #builder {
-                    #(#idents,)*
+                    #(#mandatory_field_idents,)*
+                    #(#option_field_idents,)*
+                    #(#vec_field_idents,)*
                 } = self.clone();
                 let built = #base_struct {
                     #(#mandatory_field_idents: #mandatory_field_idents.ok_or(Box::<dyn Error>::from(#missing_ident_errors))?,)*
-                    #(#optional_field_idents)*
+                    #(#option_field_idents,)*
+                    #(#vec_field_idents,)*
                 };
                 Ok(built)
             }
@@ -74,10 +107,16 @@ pub fn derive(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
+#[derive(Clone)]
 struct _FieldDefinition {
     ident: Ident,
     ty: Type,
+    is_option: bool,
+    is_vec: bool,
+
     base_ty: Option<Type>,
+    setter_ident: Option<Ident>,
+    element_setter_ident: Option<Ident>,
 }
 
 struct _FieldDefinitions {
@@ -86,19 +125,44 @@ struct _FieldDefinitions {
 
 impl _FieldDefinition {
     fn new(field: &Field) -> Self {
-        let base_ty = retrieve_base_type_from_option(field.clone());
-        Self {
-            ident: field
-                .ident
-                .clone()
-                .expect("the field must be a named field"),
-            ty: field.ty.clone(),
-            base_ty,
-        }
-    }
+        let ident = field
+            .ident
+            .clone()
+            .expect("the field must be a named field");
 
-    fn is_option(&self) -> bool {
-        self.base_ty.is_some()
+        let mut base_ty = try_retrieve_base_type(field, "Option");
+        let is_option = base_ty.is_some();
+        let mut is_vec = false;
+
+        if !is_option {
+            base_ty = try_retrieve_base_type(field, "Vec");
+            is_vec = base_ty.is_some();
+        }
+
+        let mut setter_ident = Some(ident.clone());
+        let element_setter_ident = try_retrieve_element_setter_ident(field);
+        if element_setter_ident.is_some() {
+            if !is_vec {
+                panic!(
+                    "element setter {} is set for a non-vec type",
+                    element_setter_ident.unwrap().to_string()
+                );
+            }
+
+            if setter_ident == element_setter_ident {
+                setter_ident = None;
+            }
+        }
+
+        Self {
+            ident,
+            ty: field.ty.clone(),
+            is_option,
+            is_vec,
+            base_ty,
+            setter_ident,
+            element_setter_ident,
+        }
     }
 }
 
@@ -113,36 +177,91 @@ impl _FieldDefinitions {
         Self { definitions }
     }
 
-    fn idents(&self) -> Vec<Ident> {
+    fn filtered_by(&self, is_option: bool, is_vec: bool) -> Self {
+        let filtered_definitions = self
+            .definitions
+            .iter()
+            .filter(|field_definition| {
+                field_definition.is_option == is_option && field_definition.is_vec == is_vec
+            })
+            .map(|field_definition| field_definition.to_owned())
+            .collect::<Vec<_FieldDefinition>>();
+        Self {
+            definitions: filtered_definitions,
+        }
+    }
+
+    fn select_idents(self) -> Vec<Ident> {
         self.definitions
             .iter()
             .map(|field_definition| field_definition.ident.clone())
             .collect::<Vec<Ident>>()
     }
 
-    fn partial_idents(&self, is_option: bool) -> Vec<Ident> {
+    fn select_types(self) -> Vec<Type> {
         self.definitions
             .iter()
-            .filter(|field_definition| field_definition.is_option() == is_option)
-            .map(|field_definition| field_definition.ident.clone())
-            .collect::<Vec<Ident>>()
+            .map(|field_definition| field_definition.ty.clone())
+            .collect::<Vec<Type>>()
     }
 
-    fn partial_types(&self, is_option: bool, is_base: bool) -> Vec<Type> {
+    fn select_base_types(self) -> Vec<Type> {
         self.definitions
             .iter()
-            .filter(|field_definition| field_definition.is_option() == is_option)
             .map(|field_definition| {
-                if is_base {
+                field_definition
+                    .base_ty
+                    .clone()
+                    .expect("base type does not exist")
+            })
+            .collect::<Vec<Type>>()
+    }
+
+    fn select_vec_setter_components(&self) -> (Vec<Ident>, Vec<Type>) {
+        self.definitions
+            .iter()
+            .filter(|field_definition| field_definition.setter_ident.is_some())
+            .map(|field_definition| {
+                (
+                    field_definition
+                        .setter_ident
+                        .clone()
+                        .expect("setter_ident must be present"),
+                    field_definition.ty.clone(),
+                )
+            })
+            .unzip()
+    }
+
+    fn select_vec_element_setter_components(&self) -> (Vec<Ident>, Vec<Ident>, Vec<Type>) {
+        let components = self
+            .definitions
+            .iter()
+            .filter(|field_definition| field_definition.element_setter_ident.is_some())
+            .map(|field_definition| {
+                (
+                    field_definition.ident.clone(),
+                    field_definition
+                        .element_setter_ident
+                        .clone()
+                        .expect("element_setter_ident must be present"),
                     field_definition
                         .base_ty
                         .clone()
-                        .expect("base type does not exist")
-                } else {
-                    field_definition.ty.clone()
-                }
-            })
-            .collect::<Vec<Type>>()
+                        .expect("base type does not exist"),
+                )
+            });
+
+        let mut container_idents = Vec::new();
+        let mut setter_idents = Vec::new();
+        let mut setter_types = Vec::new();
+        for component in components {
+            container_idents.push(component.0);
+            setter_idents.push(component.1);
+            setter_types.push(component.2);
+        }
+
+        (container_idents, setter_idents, setter_types)
     }
 }
 
@@ -156,43 +275,92 @@ fn retrieve_named_fields(data: Data) -> Fields {
     }
 }
 
-fn retrieve_base_type_from_option(field: Field) -> Option<Type> {
-    match field.ty {
-        Type::Path(TypePath {
-            qself: None,
-            path: Path {
-                leading_colon: _,
-                segments,
-            },
-        }) => {
-            if segments.len() == 1 {
-                if let Some(segment) = segments.first() {
-                    if segment.ident.to_string() == "Option" {
-                        match segment.arguments.clone() {
-                            PathArguments::AngleBracketed(AngleBracketedGenericArguments {
-                                colon2_token: _,
-                                lt_token: _,
-                                gt_token: _,
-                                args,
-                            }) => {
-                                if args.len() == 1 {
-                                    if let Some(arg) = args.first() {
-                                        match arg {
-                                            GenericArgument::Type(ty) => {
-                                                return Some(ty.to_owned());
-                                            }
-                                            _ => (),
-                                        }
+/// Return Some(T) if the given field has a type of X<T>, where X is outer_type
+/// otherwise None
+fn try_retrieve_base_type(field: &Field, outer_type: &str) -> Option<Type> {
+    match field.clone().ty {
+        Type::Path(TypePath { qself: None, path }) => {
+            if let Some(segment) = try_retrieve_named_ident(&path, outer_type) {
+                match segment.arguments.clone() {
+                    PathArguments::AngleBracketed(AngleBracketedGenericArguments {
+                        colon2_token: _,
+                        lt_token: _,
+                        gt_token: _,
+                        args,
+                    }) => {
+                        if args.len() == 1 {
+                            if let Some(arg) = args.first() {
+                                match arg {
+                                    GenericArgument::Type(ty) => {
+                                        return Some(ty.to_owned());
                                     }
+                                    _ => (),
                                 }
                             }
-                            _ => (),
                         }
                     }
+                    _ => (),
                 }
             }
         }
         _ => (),
+    }
+
+    None
+}
+
+fn try_retrieve_named_ident(path: &Path, name: &str) -> Option<PathSegment> {
+    if path.leading_colon.is_some() {
+        return None; // only available for a path without leading_colon
+    }
+    let segments = &path.segments;
+    if segments.len() == 1 {
+        if let Some(segment) = segments.first() {
+            if segment.ident.to_string() == name {
+                return Some(segment.to_owned());
+            }
+        }
+    }
+
+    None
+}
+
+fn try_retrieve_element_setter_ident(field: &Field) -> Option<Ident> {
+    for attr in field.attrs.clone() {
+        if let Ok(meta) = attr.parse_meta() {
+            match meta {
+                Meta::List(MetaList {
+                    path,
+                    paren_token: _,
+                    nested,
+                }) => {
+                    if try_retrieve_named_ident(&path, "builder").is_some() {
+                        if nested.len() == 1 {
+                            if let Some(nested) = nested.first() {
+                                match nested {
+                                    NestedMeta::Meta(Meta::NameValue(MetaNameValue {
+                                        path,
+                                        eq_token: _,
+                                        lit,
+                                    })) => {
+                                        if try_retrieve_named_ident(&path, "each").is_some() {
+                                            if let Lit::Str(lit) = lit {
+                                                return Some(Ident::new(
+                                                    lit.value().as_str(),
+                                                    Span::call_site(),
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    _ => (),
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => (),
+            }
+        }
     }
 
     None
