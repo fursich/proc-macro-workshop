@@ -50,33 +50,31 @@ pub fn derive(input: TokenStream) -> TokenStream {
             .select_vec_element_setter_components();
 
     let expanded = quote! {
-        use std::error::Error;
-
         #[derive(Clone)]
         pub struct #builder {
-            #(#mandatory_field_idents: Option<#mandatory_field_types>,)*
-            #(#option_field_idents: Option<#option_base_field_types>,)*
-            #(#vec_field_idents: Vec<#vec_base_field_types>,)*
+            #(#mandatory_field_idents: std::option::Option<#mandatory_field_types>,)*
+            #(#option_field_idents: std::option::Option<#option_base_field_types>,)*
+            #(#vec_field_idents: std::vec::Vec<#vec_base_field_types>,)*
         }
         impl #base_struct {
             pub fn builder() -> #builder {
                 #builder {
-                    #(#mandatory_field_idents: None,)*
-                    #(#option_field_idents: None,)*
-                    #(#vec_field_idents: Vec::new(),)*
+                    #(#mandatory_field_idents: std::option::Option::None,)*
+                    #(#option_field_idents: std::option::Option::None,)*
+                    #(#vec_field_idents: std::vec::Vec::new(),)*
                 }
             }
         }
         impl #builder {
             #(
                 fn #mandatory_field_idents(&mut self, #mandatory_field_idents: #mandatory_field_types) -> &mut Self {
-                    self.#mandatory_field_idents = Some(#mandatory_field_idents);
+                    self.#mandatory_field_idents = std::option::Option::Some(#mandatory_field_idents);
                     self
                 }
             )*
             #(
                 fn #option_field_idents(&mut self, #option_field_idents: #option_base_field_types) -> &mut Self {
-                    self.#option_field_idents = Some(#option_field_idents);
+                    self.#option_field_idents = std::option::Option::Some(#option_field_idents);
                     self
                 }
             )*
@@ -93,14 +91,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 }
             )*
 
-            pub fn build(&self) -> Result<#base_struct, Box<dyn Error>> {
+            pub fn build(&self) -> std::result::Result<#base_struct, std::boxed::Box<dyn std::error::Error>> {
                 let #builder {
                     #(#mandatory_field_idents,)*
                     #(#option_field_idents,)*
                     #(#vec_field_idents,)*
                 } = self.clone();
                 let built = #base_struct {
-                    #(#mandatory_field_idents: #mandatory_field_idents.ok_or(Box::<dyn Error>::from(#missing_ident_errors))?,)*
+                    #(#mandatory_field_idents: #mandatory_field_idents.ok_or(std::boxed::Box::<dyn std::error::Error>::from(#missing_ident_errors))?,)*
                     #(#option_field_idents,)*
                     #(#vec_field_idents,)*
                 };
