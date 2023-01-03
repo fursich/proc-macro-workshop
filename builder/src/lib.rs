@@ -6,7 +6,7 @@ use syn::{
     GenericArgument, Path, PathArguments, Type, TypePath,
 };
 
-#[proc_macro_derive(Builder)]
+#[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let base_struct = input.ident;
@@ -16,29 +16,18 @@ pub fn derive(input: TokenStream) -> TokenStream {
     );
 
     let data = input.data;
-    let fields = retrieve_named_fields(data);
-    let (mandatory_fields, optional_fields) = partition_fields_by_optional_types(fields.clone());
+    let field_definitions = _FieldDefinitions::new(data);
 
-    let mandatory_field_idents = mandatory_fields
-        .iter()
-        .map(|(field, _ty)| field.ident.to_owned())
-        .collect::<Vec<_>>();
-    let mandatory_field_types = mandatory_fields
-        .iter()
-        .map(|(_field, ty)| ty.to_owned())
-        .collect::<Vec<_>>();
-    let missing_ident_errors = mandatory_fields
-        .iter()
-        .map(|(field, _ty)| format!("{} is missing", field.ident.to_owned().unwrap()))
-        .collect::<Vec<_>>();
+    let idents = field_definitions.idents();
+    let mandatory_field_idents = field_definitions.partial_idents(false);
+    let optional_field_idents = field_definitions.partial_idents(true);
 
-    let optional_field_idents = optional_fields
+    let mandatory_field_types = field_definitions.partial_types(false, false);
+    let optional_base_field_types = field_definitions.partial_types(true, true);
+
+    let missing_ident_errors = mandatory_field_idents
         .iter()
-        .map(|(field, _ty)| field.ident.to_owned())
-        .collect::<Vec<_>>();
-    let optional_field_types = optional_fields
-        .iter()
-        .map(|(_field, ty)| ty.to_owned())
+        .map(|ident| format!("{} is missing", ident.to_owned()))
         .collect::<Vec<_>>();
 
     let expanded = quote! {
@@ -47,13 +36,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
         #[derive(Clone)]
         pub struct #builder {
             #(#mandatory_field_idents: Option<#mandatory_field_types>,)*
-            #(#optional_field_idents: Option<#optional_field_types>,)*
+            #(#optional_field_idents: Option<#optional_base_field_types>,)*
         }
         impl #base_struct {
             pub fn builder() -> #builder {
                 #builder {
-                    #(#mandatory_field_idents: None,)*
-                    #(#optional_field_idents: None,)*
+                    #(#idents: None,)*
                 }
             }
         }
@@ -65,15 +53,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 }
             )*
             #(
-                fn #optional_field_idents(&mut self, #optional_field_idents: #optional_field_types) -> &mut Self {
+                fn #optional_field_idents(&mut self, #optional_field_idents: #optional_base_field_types) -> &mut Self {
                     self.#optional_field_idents = Some(#optional_field_idents);
                     self
                 }
             )*
             pub fn build(&self) -> Result<#base_struct, Box<dyn Error>> {
                 let #builder {
-                    #(#mandatory_field_idents,)*
-                    #(#optional_field_idents,)*
+                    #(#idents,)*
                 } = self.clone();
                 let built = #base_struct {
                     #(#mandatory_field_idents: #mandatory_field_idents.ok_or(Box::<dyn Error>::from(#missing_ident_errors))?,)*
@@ -87,6 +74,78 @@ pub fn derive(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
+struct _FieldDefinition {
+    ident: Ident,
+    ty: Type,
+    base_ty: Option<Type>,
+}
+
+struct _FieldDefinitions {
+    definitions: Vec<_FieldDefinition>,
+}
+
+impl _FieldDefinition {
+    fn new(field: &Field) -> Self {
+        let base_ty = retrieve_base_type_from_option(field.clone());
+        Self {
+            ident: field
+                .ident
+                .clone()
+                .expect("the field must be a named field"),
+            ty: field.ty.clone(),
+            base_ty,
+        }
+    }
+
+    fn is_option(&self) -> bool {
+        self.base_ty.is_some()
+    }
+}
+
+impl _FieldDefinitions {
+    fn new(data: Data) -> Self {
+        let fields = retrieve_named_fields(data);
+
+        let definitions = fields
+            .iter()
+            .map(|field| _FieldDefinition::new(field))
+            .collect::<Vec<_FieldDefinition>>();
+        Self { definitions }
+    }
+
+    fn idents(&self) -> Vec<Ident> {
+        self.definitions
+            .iter()
+            .map(|field_definition| field_definition.ident.clone())
+            .collect::<Vec<Ident>>()
+    }
+
+    fn partial_idents(&self, is_option: bool) -> Vec<Ident> {
+        self.definitions
+            .iter()
+            .filter(|field_definition| field_definition.is_option() == is_option)
+            .map(|field_definition| field_definition.ident.clone())
+            .collect::<Vec<Ident>>()
+    }
+
+    fn partial_types(&self, is_option: bool, is_base: bool) -> Vec<Type> {
+        self.definitions
+            .iter()
+            .filter(|field_definition| field_definition.is_option() == is_option)
+            .map(|field_definition| {
+                if is_base {
+                    field_definition
+                        .base_ty
+                        .clone()
+                        .expect("base type does not exist")
+                } else {
+                    field_definition.ty.clone()
+                }
+            })
+            .collect::<Vec<Type>>()
+    }
+}
+
 fn retrieve_named_fields(data: Data) -> Fields {
     match data {
         Data::Struct(data) => match data.fields {
@@ -95,21 +154,6 @@ fn retrieve_named_fields(data: Data) -> Fields {
         },
         Data::Enum(_) | Data::Union(_) => unimplemented!(),
     }
-}
-
-fn partition_fields_by_optional_types(fields: Fields) -> (Vec<(Field, Type)>, Vec<(Field, Type)>) {
-    let mut optional_fields = Vec::new();
-    let mut mandatory_fields = Vec::new();
-
-    for field in fields.iter() {
-        if let Some(ty) = retrieve_base_type_from_option(field.clone()) {
-            optional_fields.push((field.to_owned(), ty));
-        } else {
-            mandatory_fields.push((field.to_owned(), field.ty.to_owned()));
-        }
-    }
-
-    (mandatory_fields, optional_fields)
 }
 
 fn retrieve_base_type_from_option(field: Field) -> Option<Type> {
