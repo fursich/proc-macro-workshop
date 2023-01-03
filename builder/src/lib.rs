@@ -2,9 +2,9 @@ use proc_macro::TokenStream;
 use proc_macro2::{Ident, Span};
 use quote::quote;
 use syn::{
-    parse_macro_input, AngleBracketedGenericArguments, Data, DeriveInput, Field, Fields,
+    parse_macro_input, AngleBracketedGenericArguments, Data, DeriveInput, Error, Field, Fields,
     GenericArgument, Lit, Meta, MetaList, MetaNameValue, NestedMeta, Path, PathArguments,
-    PathSegment, Type, TypePath,
+    PathSegment, Result, Type, TypePath,
 };
 
 #[proc_macro_derive(Builder, attributes(builder))]
@@ -18,6 +18,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     let data = input.data;
     let field_definitions = _FieldDefinitions::new(data);
+    if let Err(err) = field_definitions {
+        return err.to_compile_error().into();
+    }
+
+    let field_definitions = field_definitions.unwrap();
 
     let mandatory_field_idents = field_definitions.filtered_by(false, false).select_idents();
     let mandatory_field_types = field_definitions.filtered_by(false, false).select_types();
@@ -107,7 +112,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct _FieldDefinition {
     ident: Ident,
     ty: Type,
@@ -119,12 +124,13 @@ struct _FieldDefinition {
     element_setter_ident: Option<Ident>,
 }
 
+#[derive(Debug)]
 struct _FieldDefinitions {
     definitions: Vec<_FieldDefinition>,
 }
 
 impl _FieldDefinition {
-    fn new(field: &Field) -> Self {
+    fn new(field: &Field) -> Result<Self> {
         let ident = field
             .ident
             .clone()
@@ -140,7 +146,7 @@ impl _FieldDefinition {
         }
 
         let mut setter_ident = Some(ident.clone());
-        let element_setter_ident = try_retrieve_element_setter_ident(field);
+        let element_setter_ident = try_retrieve_element_setter_ident(field)?;
         if element_setter_ident.is_some() {
             if !is_vec {
                 panic!(
@@ -154,7 +160,7 @@ impl _FieldDefinition {
             }
         }
 
-        Self {
+        Ok(Self {
             ident,
             ty: field.ty.clone(),
             is_option,
@@ -162,19 +168,20 @@ impl _FieldDefinition {
             base_ty,
             setter_ident,
             element_setter_ident,
-        }
+        })
     }
 }
 
 impl _FieldDefinitions {
-    fn new(data: Data) -> Self {
+    fn new(data: Data) -> Result<Self> {
         let fields = retrieve_named_fields(data);
 
         let definitions = fields
             .iter()
             .map(|field| _FieldDefinition::new(field))
-            .collect::<Vec<_FieldDefinition>>();
-        Self { definitions }
+            .collect::<Result<Vec<_FieldDefinition>>>()?;
+
+        Ok(Self { definitions })
     }
 
     fn filtered_by(&self, is_option: bool, is_vec: bool) -> Self {
@@ -325,16 +332,16 @@ fn try_retrieve_named_ident(path: &Path, name: &str) -> Option<PathSegment> {
     None
 }
 
-fn try_retrieve_element_setter_ident(field: &Field) -> Option<Ident> {
+fn try_retrieve_element_setter_ident(field: &Field) -> Result<Option<Ident>> {
     for attr in field.attrs.clone() {
         if let Ok(meta) = attr.parse_meta() {
-            match meta {
+            match meta.clone() {
                 Meta::List(MetaList {
-                    path,
+                    path: base_path,
                     paren_token: _,
                     nested,
                 }) => {
-                    if try_retrieve_named_ident(&path, "builder").is_some() {
+                    if try_retrieve_named_ident(&base_path, "builder").is_some() {
                         if nested.len() == 1 {
                             if let Some(nested) = nested.first() {
                                 match nested {
@@ -345,10 +352,10 @@ fn try_retrieve_element_setter_ident(field: &Field) -> Option<Ident> {
                                     })) => {
                                         if try_retrieve_named_ident(&path, "each").is_some() {
                                             if let Lit::Str(lit) = lit {
-                                                return Some(Ident::new(
+                                                return Ok(Some(Ident::new(
                                                     lit.value().as_str(),
                                                     Span::call_site(),
-                                                ));
+                                                )));
                                             }
                                         }
                                     }
@@ -360,8 +367,12 @@ fn try_retrieve_element_setter_ident(field: &Field) -> Option<Ident> {
                 }
                 _ => (),
             }
+            return Err(Error::new_spanned(
+                meta.to_owned(),
+                "expected `builder(each = \"...\")`",
+            ));
         }
     }
 
-    None
+    Ok(None)
 }
