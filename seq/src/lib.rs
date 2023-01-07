@@ -1,7 +1,8 @@
 use proc_macro::TokenStream;
+use proc_macro2;
 // use quote::quote;
 use syn::parse::{Parse, ParseStream};
-use syn::{parse_macro_input, Block, LitInt, Result, Token};
+use syn::{braced, parse_macro_input, LitInt, Result, Token};
 
 #[derive(Debug)]
 struct SecMarcoInput {/* ... */}
@@ -16,8 +17,12 @@ impl Parse for SecMarcoInput {
         let _dots = <Token![..]>::parse(input)?;
         let to = <LitInt>::parse(input)?;
         eprintln!("{:?}, {:?}, {:?}", from, _dots, to);
-        let block = <Block>::parse(input)?;
-        eprintln!("{:?}", block);
+        let content;
+        let _braces = braced!(content in input);
+        eprintln!("{:?}", content);
+        eprintln!("{:?}", _braces);
+        let ts = proc_macro2::TokenStream::parse(&content)?;
+        eprintln!("{:?}", ts);
 
         Ok(SecMarcoInput {})
     }
