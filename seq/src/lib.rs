@@ -17,7 +17,15 @@ impl Parse for SecMarcoInput {
         let ident = syn::Ident::parse(input)?;
         let _in = <Token![in]>::parse(input)?;
         let from = <LitInt>::parse(input)?;
-        let _dots = <Token![..]>::parse(input)?;
+
+        let mut margin = 0;
+        let dotdot_eq = <Token![..=]>::parse(input);
+        if dotdot_eq.is_ok() {
+            margin = 1;
+        } else {
+            <Token![..]>::parse(input)?;
+        }
+
         let to = <LitInt>::parse(input)?;
         let content;
         let _braces = braced!(content in input);
@@ -26,7 +34,7 @@ impl Parse for SecMarcoInput {
 
         Ok(SecMarcoInput {
             from: from.base10_parse::<usize>()?,
-            to: to.base10_parse::<usize>()?,
+            to: to.base10_parse::<usize>()? + margin,
             ident,
             ts,
         })
