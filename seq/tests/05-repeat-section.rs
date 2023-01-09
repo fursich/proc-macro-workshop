@@ -39,9 +39,47 @@ seq!(N in 0..16 {
     }
 });
 
+// additional test 1
+// check if each #()* is expanded independntly
+seq!(N in 0..4 {
+    #[derive(Copy, Clone, PartialEq, Debug)]
+    enum ProductCode {
+        #(
+            ItemTypeA~N,
+        )*
+        #(
+            ItemTypeB~N,
+        )*
+    }
+});
+
+// additional test 2
+// make sure 'global' loop can be parsed as well
+seq!(N in 1..4 {
+    fn f~N () -> u64 {
+        N * 2
+    }
+});
+
+fn f0() -> u64 {
+    100
+}
+
 fn main() {
     let interrupt = Interrupt::Irq8;
 
     assert_eq!(interrupt as u8, 8);
     assert_eq!(interrupt, Interrupt::Irq8);
+
+    let product_code1 = ProductCode::ItemTypeA2;
+    let product_code2 = ProductCode::ItemTypeB3;
+
+    assert_eq!(product_code1 as u8, 2);
+    assert_eq!(product_code1, ProductCode::ItemTypeA2);
+    assert_eq!(product_code2 as u8, 4 + 3);
+    assert_eq!(product_code2, ProductCode::ItemTypeB3);
+
+    let sum = f0() + f1() + f2() + f3();
+
+    assert_eq!(sum, 100 + 2 + 4 + 6);
 }
